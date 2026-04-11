@@ -15,9 +15,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - name: Go test
@@ -32,9 +32,9 @@ jobs:
         arch: [amd64, arm64]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - name: Install toolchain
@@ -68,7 +68,7 @@ jobs:
           rm "dist/${BINARY}"
           (cd dist && sha256sum "${BINARY}.tar.gz" > "${BINARY}.tar.gz.sha256")
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-${{ matrix.arch }}
           path: dist/*
@@ -79,9 +79,9 @@ jobs:
     needs: tests
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - name: Build arm64 (native)
@@ -112,14 +112,14 @@ jobs:
           rm "dist/${BINARY}"
           (cd dist && shasum -a 256 "${BINARY}.tar.gz" > "${BINARY}.tar.gz.sha256")
       - name: Upload arm64 artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-arm64
           path: |
             dist/whatsapp-cli-darwin-arm64.tar.gz
             dist/whatsapp-cli-darwin-arm64.tar.gz.sha256
       - name: Upload amd64 artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-amd64
           path: |
@@ -132,9 +132,9 @@ jobs:
     needs: tests
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - name: Build and package
@@ -153,7 +153,7 @@ jobs:
           $hash = (Get-FileHash "dist/$archive" -Algorithm SHA256).Hash.ToLower()
           "$hash  $archive" | Out-File -FilePath "dist/$archive.sha256" -Encoding utf8
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-amd64
           path: dist/*
@@ -167,7 +167,7 @@ jobs:
       - build-windows
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release
       - name: Prepare release bundle
@@ -190,14 +190,22 @@ jobs:
             cosign sign-blob --yes --output-signature "${file}.sig" --output-certificate "${file}.pem" "$file"
           done
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          assets=(
             release-files/*.tar.gz
             release-files/*.zip
             release-files/checksums.txt
             release-files/*.sig
             release-files/*.pem
+          )
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" "${assets[@]}" --verify-tag --title "${GITHUB_REF_NAME}" --notes ""
+          fi
 
   update-homebrew:
     name: Update Homebrew formula
@@ -205,7 +213,7 @@ jobs:
     needs: publish
     steps:
       - name: Checkout tap repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: vicentereig/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
