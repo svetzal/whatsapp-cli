@@ -16,7 +16,7 @@ import (
 
 var (
 	// version is overridden at build time via -ldflags "-X main.version=X.Y.Z"
-	version = "1.3.1"
+	version = "1.3.3"
 )
 
 const (
