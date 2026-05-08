@@ -43,6 +43,14 @@ destination with `DEST=/somewhere/else ./install.sh`.
   `~/bin` were removed from PATH, but it also confuses which version is
   running. We removed it intentionally.
 
+## Logging fork-only changes
+
+`CHANGELOG.md` is upstream's. Don't edit it for fork-only work — every
+upstream release would create a merge conflict. Instead, add entries to
+`CHANGELOG.fork.md` with date headings (the fork has no version numbers;
+we install from `main`). When an entry lands upstream, delete it from
+`CHANGELOG.fork.md` rather than reconciling it into upstream's file.
+
 ## Testing
 
 ```

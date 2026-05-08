@@ -79,6 +79,8 @@ func (m *MockMessageStore) Close() error {
 // MockWAClient implements WAClient for testing.
 type MockWAClient struct {
 	IsAuthenticatedFunc     func() bool
+	IsConnectedFunc         func() bool
+	IsLoggedInFunc          func() bool
 	AuthenticateFunc        func(ctx context.Context) error
 	ConnectFunc             func(ctx context.Context) error
 	DisconnectFunc          func()
@@ -92,6 +94,20 @@ type MockWAClient struct {
 func (m *MockWAClient) IsAuthenticated() bool {
 	if m.IsAuthenticatedFunc != nil {
 		return m.IsAuthenticatedFunc()
+	}
+	return true
+}
+
+func (m *MockWAClient) IsConnected() bool {
+	if m.IsConnectedFunc != nil {
+		return m.IsConnectedFunc()
+	}
+	return true
+}
+
+func (m *MockWAClient) IsLoggedIn() bool {
+	if m.IsLoggedInFunc != nil {
+		return m.IsLoggedInFunc()
 	}
 	return true
 }

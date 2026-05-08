@@ -593,6 +593,16 @@ func (w *mediaDownloadWorker) Stop() {
 	w.wg.Wait()
 }
 
+// Watchdog tuning. Exposed as vars (not const) so tests can shorten them.
+var (
+	// syncWatchdogInterval is how often the sync watchdog checks connection state.
+	syncWatchdogInterval = 30 * time.Second
+	// syncWatchdogResetAfter is how long the connection can be down before the
+	// watchdog forces a clean Disconnect+Connect cycle to break out of a wedged
+	// auto-reconnect loop in whatsmeow.
+	syncWatchdogResetAfter = 5 * time.Minute
+)
+
 // Sync connects to WhatsApp and continuously syncs messages to the database
 func (a *App) Sync(ctx context.Context) string {
 	messageCount := 0
@@ -602,6 +612,11 @@ func (a *App) Sync(ctx context.Context) string {
 		version = "unknown"
 	}
 	fmt.Fprintf(os.Stderr, "ℹ️  whatsapp-cli version: %s\n", version)
+
+	// Wrap the caller context so terminal events (LoggedOut, StreamReplaced)
+	// and the watchdog (after exhaustion) can cancel the sync from inside.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	worker := newMediaDownloadWorker(a, 4)
 	worker.Start(ctx)
@@ -802,7 +817,34 @@ func (a *App) Sync(ctx context.Context) string {
 			fmt.Fprintln(os.Stderr, "🔄 Listening for messages... (Press Ctrl+C to stop)")
 
 		case *events.Disconnected:
-			fmt.Fprintln(os.Stderr, "\n⚠ Disconnected from WhatsApp")
+			fmt.Fprintln(os.Stderr, "\n⚠ Disconnected from WhatsApp (auto-reconnect in progress)")
+
+		case *events.KeepAliveTimeout:
+			// Keepalive ping has not been answered. Whatsmeow will force a
+			// reconnect after KeepAliveMaxFailTime (3min) of failures; surface
+			// it now so the user knows the connection is degraded.
+			fmt.Fprintf(os.Stderr, "\n⏱ Keepalive timeout (errors=%d, last success %s ago)\n",
+				v.ErrorCount, time.Since(v.LastSuccess).Round(time.Second))
+
+		case *events.KeepAliveRestored:
+			fmt.Fprintln(os.Stderr, "\n✓ Keepalive restored")
+
+		case *events.LoggedOut:
+			// Terminal: the WhatsApp server invalidated this session.
+			// Auto-reconnect will not recover this — the user must re-auth.
+			fmt.Fprintf(os.Stderr, "\n✗ Logged out by WhatsApp (reason: %s). Run `whatsapp-cli auth` to re-authenticate.\n", v.Reason)
+			cancel()
+
+		case *events.StreamReplaced:
+			// Terminal: another whatsapp-cli process took over this session.
+			fmt.Fprintln(os.Stderr, "\n✗ Stream replaced — another session opened with this device. Stopping sync.")
+			cancel()
+
+		case *events.ConnectFailure:
+			fmt.Fprintf(os.Stderr, "\n⚠ Connect failure (reason: %s)\n", v.Reason)
+
+		case *events.TemporaryBan:
+			fmt.Fprintf(os.Stderr, "\n⚠ Temporarily banned (code=%d, expire=%s)\n", v.Code, v.Expire)
 		}
 	}
 
@@ -812,8 +854,18 @@ func (a *App) Sync(ctx context.Context) string {
 		return output.Error(err)
 	}
 
-	// Wait for context cancellation (Ctrl+C)
+	// Watchdog: whatsmeow's internal auto-reconnect occasionally wedges
+	// (growing backoff, stale state) and the sync silently stops delivering
+	// messages while the process keeps running. Detect prolonged disconnects
+	// and force a clean reconnect cycle.
+	var watchdogWG sync.WaitGroup
+	a.runSyncWatchdog(ctx, &watchdogWG)
+
+	// Wait for context cancellation (Ctrl+C, LoggedOut, StreamReplaced)
 	<-ctx.Done()
+
+	// Drain the watchdog before returning so its goroutine doesn't outlive Sync.
+	watchdogWG.Wait()
 
 	fmt.Fprintf(os.Stderr, "\n\n✓ Sync completed. Total messages synced: %d\n", messageCount)
 
@@ -821,6 +873,71 @@ func (a *App) Sync(ctx context.Context) string {
 		"synced":         true,
 		"messages_count": messageCount,
 	})
+}
+
+// runSyncWatchdog periodically checks the connection state and forces a clean
+// reconnect if the client has been disconnected for longer than
+// syncWatchdogResetAfter. Returns immediately; the watchdog runs in a
+// goroutine that signals completion through wg before exiting.
+func (a *App) runSyncWatchdog(ctx context.Context, wg *sync.WaitGroup) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(syncWatchdogInterval)
+		defer ticker.Stop()
+
+		var disconnectedSince time.Time
+		warned := false
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+
+			if a.client.IsConnected() && a.client.IsLoggedIn() {
+				if !disconnectedSince.IsZero() {
+					disconnectedSince = time.Time{}
+					warned = false
+				}
+				continue
+			}
+
+			if disconnectedSince.IsZero() {
+				disconnectedSince = time.Now()
+				continue
+			}
+
+			down := time.Since(disconnectedSince)
+			if !warned && down >= syncWatchdogInterval*2 {
+				fmt.Fprintf(os.Stderr, "\n⚠ Sync watchdog: client disconnected for %s\n", down.Round(time.Second))
+				warned = true
+			}
+
+			if down < syncWatchdogResetAfter {
+				continue
+			}
+
+			// Force a clean reconnect cycle. whatsmeow's internal auto-reconnect
+			// can get wedged with growing backoff or stale state; calling
+			// Disconnect() then Connect() resets it.
+			fmt.Fprintf(os.Stderr, "\n⟳ Sync watchdog: forcing reconnect after %s offline\n", down.Round(time.Second))
+			a.client.Disconnect()
+			if err := a.client.Connect(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "⚠ Sync watchdog: reconnect attempt failed: %v\n", err)
+				// Reset the timer so we don't hammer; next check is one
+				// interval later, and another reset attempt is one
+				// syncWatchdogResetAfter window away.
+				disconnectedSince = time.Now()
+				warned = false
+				continue
+			}
+			// Successful reconnect; events.Connected handler will print "✓".
+			disconnectedSince = time.Time{}
+			warned = false
+		}
+	}()
 }
 
 func resolveVersion(version string, describeFn func() (string, error)) string {

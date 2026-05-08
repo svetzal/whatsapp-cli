@@ -39,6 +39,8 @@ type MessageStore interface {
 // The concrete implementation is client.WAClient.
 type WAClient interface {
 	IsAuthenticated() bool
+	IsConnected() bool
+	IsLoggedIn() bool
 	Authenticate(ctx context.Context) error
 	Connect(ctx context.Context) error
 	Disconnect()

@@ -61,7 +61,7 @@ func NewWAClient(storeDir string) (*WAClient, error) {
 		return nil, fmt.Errorf("failed to create store directory: %v", err)
 	}
 
-	dbLog := waLog.Stdout("Database", "ERROR", true)
+	dbLog := waLog.Stdout("Database", "WARN", true)
 	ctx := context.Background()
 	container, err := sqlstore.New(ctx, "sqlite3", fmt.Sprintf("file:%s/whatsapp.db?_foreign_keys=on", storeDir), dbLog)
 	if err != nil {
@@ -77,7 +77,9 @@ func NewWAClient(storeDir string) (*WAClient, error) {
 		}
 	}
 
-	logger := waLog.Stdout("Client", "ERROR", true)
+	// INFO so keepalive timeouts and reconnect attempts surface to the user.
+	// At ERROR a wedged sync looks identical to a healthy idle one.
+	logger := waLog.Stdout("Client", "INFO", true)
 	client := whatsmeow.NewClient(deviceStore, logger)
 
 	return &WAClient{
@@ -135,6 +137,18 @@ func (w *WAClient) Disconnect() {
 	if w.client != nil {
 		w.client.Disconnect()
 	}
+}
+
+// IsConnected reports whether the underlying websocket is currently connected.
+// Used by the sync watchdog to detect wedged connections.
+func (w *WAClient) IsConnected() bool {
+	return w.client != nil && w.client.IsConnected()
+}
+
+// IsLoggedIn reports whether the client has an authenticated session.
+// False after a LoggedOut event; reconnect alone will not recover.
+func (w *WAClient) IsLoggedIn() bool {
+	return w.client != nil && w.client.IsLoggedIn()
 }
 
 func (w *WAClient) SendMessage(ctx context.Context, recipient, message string) (string, error) {
