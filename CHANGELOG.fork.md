@@ -11,6 +11,22 @@ same fix — remove it from this file rather than versioning it into
 upstream's changelog. Use date headings; the fork does not carry its own
 version numbers.
 
+## 2026-06-06
+
+### Changed
+
+- `sync` no longer exits on `StreamReplaced`. A linked WhatsApp device
+  permits only one active websocket, so when another session connects with
+  this device's credentials the server tears down our stream. Instead of
+  treating that as fatal, `sync` now waits a short backoff (8s, letting a
+  transient competitor such as a one-shot `whatsapp-cli` command finish and
+  disconnect) and reconnects to reclaim the stream. A sliding-window cap
+  (3 reclaims within 2 minutes) detects a genuinely persistent competitor —
+  WhatsApp Web/Desktop left open, or another process sharing the same
+  `--store` — and stops the sync rather than ping-ponging into a reconnect
+  war (which risks a temporary ban). Tuning lives in `streamReclaim*` vars
+  in `internal/commands/commands.go`.
+
 ## 2026-05-08
 
 ### Fixed
@@ -20,9 +36,10 @@ version numbers.
   forces a clean `Disconnect`+`Connect` cycle if the client has been
   offline for ≥ 5 minutes, breaking out of any wedged auto-reconnect
   state inside `whatsmeow`.
-- `sync` now reacts to terminal session events. `LoggedOut` and
-  `StreamReplaced` cancel the sync loop instead of leaving the process
-  running idle; the user is told to re-run `whatsapp-cli auth`.
+- `sync` now reacts to terminal session events. `LoggedOut` cancels the
+  sync loop instead of leaving the process running idle; the user is told
+  to re-run `whatsapp-cli auth`. (`StreamReplaced` handling was reworked
+  on 2026-06-06 — see below.)
 
 ### Improved
 

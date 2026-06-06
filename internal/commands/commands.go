@@ -603,6 +603,27 @@ var (
 	syncWatchdogResetAfter = 5 * time.Minute
 )
 
+// Stream-reclaim tuning. A StreamReplaced event means another session connected
+// with this device's credentials, and the WhatsApp server tore down our stream
+// (a linked device permits only one active websocket). Rather than exit, we wait
+// a short backoff — letting a transient competitor such as a one-shot
+// whatsapp-cli command finish and disconnect — then reconnect to reclaim the
+// stream. A sliding-window attempt cap stops us from ping-ponging forever with a
+// genuinely persistent competitor. Exposed as vars so tests can shorten them.
+var (
+	// streamReclaimBackoff is how long to wait after a StreamReplaced before
+	// reconnecting, so a transient competitor can release the stream first.
+	streamReclaimBackoff = 8 * time.Second
+	// streamReclaimWindow is the sliding window over which reclaim attempts are
+	// counted to detect a persistent competitor.
+	streamReclaimWindow = 2 * time.Minute
+	// streamReclaimMaxAttempts is how many reclaim attempts are allowed within
+	// streamReclaimWindow before giving up and stopping the sync. Without this,
+	// a session that keeps stealing the stream back would cause an endless
+	// reconnect war (and risk a temporary ban).
+	streamReclaimMaxAttempts = 3
+)
+
 // Sync connects to WhatsApp and continuously syncs messages to the database
 func (a *App) Sync(ctx context.Context) string {
 	messageCount := 0
@@ -613,8 +634,8 @@ func (a *App) Sync(ctx context.Context) string {
 	}
 	fmt.Fprintf(os.Stderr, "ℹ️  whatsapp-cli version: %s\n", version)
 
-	// Wrap the caller context so terminal events (LoggedOut, StreamReplaced)
-	// and the watchdog (after exhaustion) can cancel the sync from inside.
+	// Wrap the caller context so a terminal event (LoggedOut) or the stream
+	// reclaimer (after it gives up) can cancel the sync from inside.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -628,6 +649,12 @@ func (a *App) Sync(ctx context.Context) string {
 			a.mediaWorker = nil
 		}
 	}()
+
+	// StreamReplaced events are delivered from whatsmeow's goroutine; the
+	// handler hands them off here so the (blocking) backoff-and-reconnect runs
+	// on the reclaimer goroutine instead. Buffered+coalesced: one pending
+	// reclaim is enough.
+	reclaimCh := make(chan struct{}, 1)
 
 	// Create event handler
 	eventHandler := func(evt interface{}) {
@@ -836,9 +863,15 @@ func (a *App) Sync(ctx context.Context) string {
 			cancel()
 
 		case *events.StreamReplaced:
-			// Terminal: another whatsapp-cli process took over this session.
-			fmt.Fprintln(os.Stderr, "\n✗ Stream replaced — another session opened with this device. Stopping sync.")
-			cancel()
+			// Another session connected with this device's credentials and the
+			// server replaced our stream. Don't exit — signal the reclaimer to
+			// back off and reconnect. A non-blocking send coalesces bursts: if a
+			// reclaim is already pending, this event is dropped.
+			fmt.Fprintln(os.Stderr, "\n⚠ Stream replaced — another session connected with this device. Attempting to reclaim...")
+			select {
+			case reclaimCh <- struct{}{}:
+			default:
+			}
 
 		case *events.ConnectFailure:
 			fmt.Fprintf(os.Stderr, "\n⚠ Connect failure (reason: %s)\n", v.Reason)
@@ -858,14 +891,18 @@ func (a *App) Sync(ctx context.Context) string {
 	// (growing backoff, stale state) and the sync silently stops delivering
 	// messages while the process keeps running. Detect prolonged disconnects
 	// and force a clean reconnect cycle.
-	var watchdogWG sync.WaitGroup
-	a.runSyncWatchdog(ctx, &watchdogWG)
+	var bgWG sync.WaitGroup
+	a.runSyncWatchdog(ctx, &bgWG)
 
-	// Wait for context cancellation (Ctrl+C, LoggedOut, StreamReplaced)
+	// Reclaimer: on StreamReplaced, back off and reconnect to take the stream
+	// back, giving up only if a persistent competitor keeps stealing it.
+	a.runStreamReclaimer(ctx, cancel, reclaimCh, &bgWG)
+
+	// Wait for context cancellation (Ctrl+C, LoggedOut, reclaimer give-up)
 	<-ctx.Done()
 
-	// Drain the watchdog before returning so its goroutine doesn't outlive Sync.
-	watchdogWG.Wait()
+	// Drain background goroutines before returning so none outlive Sync.
+	bgWG.Wait()
 
 	fmt.Fprintf(os.Stderr, "\n\n✓ Sync completed. Total messages synced: %d\n", messageCount)
 
@@ -936,6 +973,70 @@ func (a *App) runSyncWatchdog(ctx context.Context, wg *sync.WaitGroup) {
 			// Successful reconnect; events.Connected handler will print "✓".
 			disconnectedSince = time.Time{}
 			warned = false
+		}
+	}()
+}
+
+// runStreamReclaimer reacts to StreamReplaced events delivered over reclaimCh.
+// Each event triggers a backoff-then-reconnect to reclaim the WhatsApp stream
+// from whatever connected with this device's credentials. It counts attempts in
+// a sliding window: once streamReclaimMaxAttempts reclaims happen within
+// streamReclaimWindow — the signature of a persistent competitor (WhatsApp
+// Web/Desktop, or another process sharing this --store) — it cancels the sync
+// instead of ping-ponging forever. Returns immediately; the goroutine signals
+// completion through wg before exiting.
+func (a *App) runStreamReclaimer(ctx context.Context, cancel context.CancelFunc, reclaimCh <-chan struct{}, wg *sync.WaitGroup) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		// Timestamps of recent reclaim attempts, pruned to streamReclaimWindow.
+		var attempts []time.Time
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-reclaimCh:
+			}
+
+			// Drop attempts that have aged out of the window so isolated,
+			// infrequent replacements (a transient one-shot command now and
+			// then) never accumulate toward the give-up threshold.
+			now := time.Now()
+			kept := attempts[:0]
+			for _, t := range attempts {
+				if now.Sub(t) < streamReclaimWindow {
+					kept = append(kept, t)
+				}
+			}
+			attempts = kept
+
+			if len(attempts) >= streamReclaimMaxAttempts {
+				fmt.Fprintf(os.Stderr,
+					"\n✗ Stream replaced %d times within %s — a persistent session keeps taking the connection "+
+						"(WhatsApp Web/Desktop left open, or another whatsapp-cli process sharing this --store). "+
+						"Stopping sync to avoid a reconnect war.\n",
+					len(attempts), streamReclaimWindow.Round(time.Second))
+				cancel()
+				return
+			}
+			attempts = append(attempts, now)
+
+			// Back off so a transient competitor (e.g. a one-shot whatsapp-cli
+			// command) can finish and release the stream before we reclaim it.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(streamReclaimBackoff):
+			}
+
+			fmt.Fprintf(os.Stderr, "\n⟳ Reclaiming WhatsApp stream (attempt %d/%d within %s)...\n",
+				len(attempts), streamReclaimMaxAttempts, streamReclaimWindow.Round(time.Second))
+			a.client.Disconnect()
+			if err := a.client.Connect(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "⚠ Reclaim reconnect failed: %v\n", err)
+			}
 		}
 	}()
 }

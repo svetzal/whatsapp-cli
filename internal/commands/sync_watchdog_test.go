@@ -72,9 +72,19 @@ func TestSync_CancelsOnLoggedOutEvent(t *testing.T) {
 	}
 }
 
-func TestSync_CancelsOnStreamReplacedEvent(t *testing.T) {
+func TestSync_ReclaimsStreamOnStreamReplacedEvent(t *testing.T) {
+	// A single StreamReplaced should reclaim (Disconnect+Connect), not exit.
+	prevBackoff := streamReclaimBackoff
+	streamReclaimBackoff = 10 * time.Millisecond
+	defer func() { streamReclaimBackoff = prevBackoff }()
+
+	var disconnectCount, connectCount atomic.Int32
 	handlerCh := make(chan func(interface{}), 1)
-	mock := &MockWAClient{StartSyncFunc: captureHandler(handlerCh)}
+	mock := &MockWAClient{
+		StartSyncFunc:  captureHandler(handlerCh),
+		DisconnectFunc: func() { disconnectCount.Add(1) },
+		ConnectFunc:    func(ctx context.Context) error { connectCount.Add(1); return nil },
+	}
 	app := newTestApp(mock)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -85,11 +95,82 @@ func TestSync_CancelsOnStreamReplacedEvent(t *testing.T) {
 
 	handler(&events.StreamReplaced{})
 
+	require.Eventually(t,
+		func() bool { return disconnectCount.Load() >= 1 && connectCount.Load() >= 1 },
+		2*time.Second, 10*time.Millisecond,
+		"reclaimer should have reconnected after a single StreamReplaced",
+	)
+
+	// Sync must still be running — a single replacement is not fatal.
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Sync did not return after StreamReplaced event")
+		t.Fatal("Sync returned on a single StreamReplaced; it should reclaim, not exit")
+	case <-time.After(50 * time.Millisecond):
 	}
+
+	cancel()
+	<-done
+}
+
+func TestSync_GivesUpAfterRepeatedStreamReplaced(t *testing.T) {
+	// A persistent competitor (rapid repeated StreamReplaced) should make the
+	// reclaimer give up and let Sync return rather than ping-pong forever.
+	prevBackoff, prevWindow, prevMax := streamReclaimBackoff, streamReclaimWindow, streamReclaimMaxAttempts
+	streamReclaimBackoff = 5 * time.Millisecond
+	streamReclaimWindow = 5 * time.Second
+	streamReclaimMaxAttempts = 3
+	defer func() {
+		streamReclaimBackoff = prevBackoff
+		streamReclaimWindow = prevWindow
+		streamReclaimMaxAttempts = prevMax
+	}()
+
+	var connectCount atomic.Int32
+	handlerCh := make(chan func(interface{}), 1)
+	mock := &MockWAClient{
+		StartSyncFunc:  captureHandler(handlerCh),
+		DisconnectFunc: func() {},
+		ConnectFunc:    func(ctx context.Context) error { connectCount.Add(1); return nil },
+	}
+	app := newTestApp(mock)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := drainSync(app, ctx)
+	handler := awaitHandler(t, handlerCh)
+
+	// Fire more replacements than the cap. Each reclaim attempt re-arms the
+	// coalesced channel only after it finishes, so drive them from a goroutine
+	// that keeps the signal pending until the reclaimer gives up. Capture the
+	// cap into a local and stop once Sync returns so this goroutine neither
+	// reads the tunable global nor outlives the test (both would race the
+	// deferred restore above).
+	maxAttempts := streamReclaimMaxAttempts
+	fires := maxAttempts + 2
+	stop := make(chan struct{})
+	go func() {
+		for i := 0; i < fires; i++ {
+			handler(&events.StreamReplaced{})
+			select {
+			case <-stop:
+				return
+			case <-time.After(15 * time.Millisecond):
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+		// Reclaimer hit the cap and cancelled the sync.
+	case <-time.After(3 * time.Second):
+		close(stop)
+		t.Fatal("Sync did not return after repeated StreamReplaced events")
+	}
+	close(stop)
+
+	require.LessOrEqual(t, connectCount.Load(), int32(maxAttempts),
+		"reclaimer should not reconnect more than the attempt cap before giving up")
 }
 
 func TestSync_WatchdogForcesReconnectAfterTimeout(t *testing.T) {
