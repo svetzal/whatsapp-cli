@@ -11,6 +11,21 @@ same fix — remove it from this file rather than versioning it into
 upstream's changelog. Use date headings; the fork does not carry its own
 version numbers.
 
+## 2026-07-28
+
+### Fixed
+
+- Bumped `go.mau.fi/whatsmeow` from the 2026-03-27 snapshot to
+  2026-07-22. WhatsApp began rejecting the older pin's client version
+  (`2.3000.1035920091`) with `Client outdated (405)` on connect, so any
+  fresh `sync` could no longer authenticate — an already-established
+  session kept working, which masked the breakage until a restart.
+- Adapted `DownloadMediaToFile` to whatsmeow's changed
+  `DownloadMediaWithPathToFile` signature: the `fileLength int` parameter
+  was dropped and an `allowNoHash bool` added ahead of `file`. We pass
+  `allowNoHash: false` to preserve hash verification on downloads. The
+  now-unused `req.FileLength` clamp and the `math` import went with it.
+
 ## 2026-06-06
 
 ### Changed
