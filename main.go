@@ -46,6 +46,7 @@ Commands:
   contacts search --query TEXT      Search contacts
   chats list                        List chats
   send --to RECIPIENT --message TEXT                     Send a text message
+  send --to RECIPIENT --message TEXT --reply-to ID       Reply, quoting a message
   send --to RECIPIENT --image PATH [--caption TEXT]      Send an image
   media download --message-id ID [--chat JID] [--output PATH]   Download media for a message
   version                           Print CLI version information
@@ -222,6 +223,7 @@ func main() {
 		message := sendCmd.String("message", "", "message text")
 		image := sendCmd.String("image", "", "image file path")
 		caption := sendCmd.String("caption", "", "image caption")
+		replyTo := sendCmd.String("reply-to", "", "quote this message id in the reply")
 		sendCmd.Parse(args[1:])
 
 		if *to == "" {
@@ -230,10 +232,17 @@ func main() {
 		if *image != "" && *message != "" {
 			exitJSON(`--message and --image are mutually exclusive`)
 		}
+		if *replyTo != "" && *image != "" {
+			exitJSON(`--reply-to applies to --message, not --image`)
+		}
 		if *image != "" {
 			result = app.SendImage(ctx, *to, *image, *caption)
 		} else if *message != "" {
-			result = app.SendMessage(ctx, *to, *message)
+			if *replyTo != "" {
+				result = app.SendReply(ctx, *to, *message, *replyTo)
+			} else {
+				result = app.SendMessage(ctx, *to, *message)
+			}
 		} else {
 			exitJSON(`--message or --image required`)
 		}

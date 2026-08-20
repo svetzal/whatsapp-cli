@@ -11,6 +11,17 @@ same fix — remove it from this file rather than versioning it into
 upstream's changelog. Use date headings; the fork does not carry its own
 version numbers.
 
+## 2026-08-20
+
+### Added
+
+- `send --reply-to MESSAGE_ID` quotes an earlier message, so a reply lands
+  against the message it answers instead of at the bottom of a busy chat.
+  The quoted message is read from the local store, so the id must belong to
+  a message this store has already synced. Replying to one of our own
+  messages resolves the store's `"me"` sender to the paired account's JID,
+  because a quote has to name an addressable participant.
+
 ## 2026-07-28
 
 ### Fixed

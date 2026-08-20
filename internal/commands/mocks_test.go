@@ -10,14 +10,14 @@ import (
 
 // MockMessageStore implements MessageStore for testing.
 type MockMessageStore struct {
-	ListMessagesFunc        func(params store.ListMessagesParams) ([]store.Message, error)
-	SearchContactsFunc      func(query string) ([]store.Contact, error)
-	ListChatsFunc           func(params store.ListChatsParams) ([]store.Chat, error)
-	StoreChatFunc           func(jid, name string, lastMessageTime time.Time) error
-	StoreMessageFunc        func(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool, mediaType, filename, url, directPath, mimeType string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error
+	ListMessagesFunc          func(params store.ListMessagesParams) ([]store.Message, error)
+	SearchContactsFunc        func(query string) ([]store.Contact, error)
+	ListChatsFunc             func(params store.ListChatsParams) ([]store.Chat, error)
+	StoreChatFunc             func(jid, name string, lastMessageTime time.Time) error
+	StoreMessageFunc          func(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool, mediaType, filename, url, directPath, mimeType string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error
 	GetMessageForDownloadFunc func(id string, chatJID *string) (store.MessageDownloadInfo, error)
-	MarkMediaDownloadedFunc func(id, chatJID, localPath string, downloadedAt time.Time) error
-	CloseFunc               func() error
+	MarkMediaDownloadedFunc   func(id, chatJID, localPath string, downloadedAt time.Time) error
+	CloseFunc                 func() error
 }
 
 func (m *MockMessageStore) ListMessages(params store.ListMessagesParams) ([]store.Message, error) {
@@ -79,12 +79,14 @@ func (m *MockMessageStore) Close() error {
 // MockWAClient implements WAClient for testing.
 type MockWAClient struct {
 	IsAuthenticatedFunc     func() bool
+	OwnJIDFunc              func() string
 	IsConnectedFunc         func() bool
 	IsLoggedInFunc          func() bool
 	AuthenticateFunc        func(ctx context.Context) error
 	ConnectFunc             func(ctx context.Context) error
 	DisconnectFunc          func()
 	SendMessageFunc         func(ctx context.Context, recipient, message string) (string, error)
+	SendReplyFunc           func(ctx context.Context, recipient, message string, quoted types.QuotedContext) (string, error)
 	SendImageMessageFunc    func(ctx context.Context, recipient, imagePath, caption string) (string, error)
 	ResolveChatNameFunc     func(ctx context.Context, jid string, evt interface{}) string
 	DownloadMediaToFileFunc func(ctx context.Context, req types.MediaDownloadRequest, targetPath string) (int64, error)
@@ -96,6 +98,13 @@ func (m *MockWAClient) IsAuthenticated() bool {
 		return m.IsAuthenticatedFunc()
 	}
 	return true
+}
+
+func (m *MockWAClient) OwnJID() string {
+	if m.OwnJIDFunc != nil {
+		return m.OwnJIDFunc()
+	}
+	return "15550000000@s.whatsapp.net"
 }
 
 func (m *MockWAClient) IsConnected() bool {
@@ -135,6 +144,13 @@ func (m *MockWAClient) Disconnect() {
 func (m *MockWAClient) SendMessage(ctx context.Context, recipient, message string) (string, error) {
 	if m.SendMessageFunc != nil {
 		return m.SendMessageFunc(ctx, recipient, message)
+	}
+	return "mock-id", nil
+}
+
+func (m *MockWAClient) SendReply(ctx context.Context, recipient, message string, quoted types.QuotedContext) (string, error) {
+	if m.SendReplyFunc != nil {
+		return m.SendReplyFunc(ctx, recipient, message, quoted)
 	}
 	return "mock-id", nil
 }

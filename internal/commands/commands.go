@@ -180,6 +180,68 @@ func (a *App) SendMessage(ctx context.Context, recipient, message string) string
 	})
 }
 
+// SendReply sends a text message quoting an earlier one. The quoted message is
+// read from the local store, so the id must belong to a message this store has
+// already synced.
+func (a *App) SendReply(ctx context.Context, recipient, message, replyToID string) string {
+	chatJID := recipientToJID(recipient)
+	quotedMsg, err := a.store.GetMessageForDownload(replyToID, &chatJID)
+	if err != nil {
+		return output.Error(fmt.Errorf("looking up message %s to reply to: %w", replyToID, err))
+	}
+
+	// An outbound message is stored with sender "me", which is not a JID the
+	// quote can address. Reply to our own message and WhatsApp needs our own
+	// account instead.
+	quotedSender := quotedMsg.Sender
+	if quotedMsg.IsFromMe || quotedSender == "me" {
+		quotedSender = a.client.OwnJID()
+		if quotedSender == "" {
+			return output.Error(fmt.Errorf("cannot quote our own message: own JID unavailable"))
+		}
+	}
+
+	if err := a.client.Connect(ctx); err != nil {
+		return output.Error(err)
+	}
+
+	msgID, err := a.client.SendReply(ctx, recipient, message, types.QuotedContext{
+		ID:     quotedMsg.ID,
+		Sender: quotedSender,
+		Text:   quotedMsg.Content,
+	})
+	if err != nil {
+		return output.Error(err)
+	}
+
+	timestamp := time.Now()
+
+	chatName := a.client.ResolveChatName(ctx, chatJID, nil)
+	if chatName == "" {
+		chatName = recipient
+	}
+
+	if err := a.store.StoreChat(chatJID, chatName, timestamp); err != nil {
+		return output.Error(fmt.Errorf("storing chat: %w", err))
+	}
+	if err := a.store.StoreMessage(
+		msgID, chatJID, "me", message, timestamp, true,
+		"", "", "", "", "",
+		nil, nil, nil, 0,
+	); err != nil {
+		return output.Error(fmt.Errorf("storing message: %w", err))
+	}
+
+	return output.Success(map[string]interface{}{
+		"sent":        true,
+		"id":          msgID,
+		"recipient":   recipient,
+		"message":     message,
+		"in_reply_to": quotedMsg.ID,
+		"quoted_text": quotedMsg.Content,
+	})
+}
+
 func (a *App) SendImage(ctx context.Context, recipient, imagePath, caption string) string {
 	if err := a.client.Connect(ctx); err != nil {
 		return output.Error(err)

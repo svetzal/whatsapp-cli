@@ -570,7 +570,7 @@ Send a text message to an individual or group.
 
 **Syntax:**
 ```bash
-whatsapp-cli send --to RECIPIENT --message TEXT
+whatsapp-cli send --to RECIPIENT --message TEXT [--reply-to MESSAGE_ID]
 ```
 
 **Parameters:**
@@ -579,6 +579,17 @@ whatsapp-cli send --to RECIPIENT --message TEXT
 |------|------|----------|---------|-------------|
 | `--to` | string | Yes | - | Phone number or JID |
 | `--message` | string | Yes | - | Message text content |
+| `--reply-to` | string | No | - | Quote this message id, so the reply threads against it |
+
+**Replying to a message:**
+
+```bash
+whatsapp-cli send --to 1234567890 --message "On it" --reply-to 3EB0C767D26B8CFC29C8
+```
+
+The quoted message is read from the local store, so the id must belong to a
+message already synced there. Use `messages list` to find it. Quoting works
+for messages from the other party and for your own.
 
 **Recipient Formats:**
 

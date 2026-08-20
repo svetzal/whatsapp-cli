@@ -53,7 +53,6 @@ type MessageDetails struct {
 	Media     *MediaInfo
 }
 
-
 func NewWAClient(storeDir string) (*WAClient, error) {
 	// Create store directory
 	if err := os.MkdirAll(storeDir, 0755); err != nil {
@@ -91,6 +90,16 @@ func NewWAClient(storeDir string) (*WAClient, error) {
 
 func (w *WAClient) IsAuthenticated() bool {
 	return w.client.Store.ID != nil
+}
+
+// OwnJID reports this device's account JID, or "" when not paired. Quoting one
+// of our own messages needs it, because the store records those with sender
+// "me" rather than an addressable JID.
+func (w *WAClient) OwnJID() string {
+	if w.client == nil || w.client.Store == nil || w.client.Store.ID == nil {
+		return ""
+	}
+	return w.client.Store.ID.ToNonAD().String()
 }
 
 func (w *WAClient) Authenticate(ctx context.Context) error {
@@ -162,6 +171,48 @@ func (w *WAClient) SendMessage(ctx context.Context, recipient, message string) (
 
 	resp, err := w.client.SendMessage(ctx, recipientJID, &waProto.Message{
 		Conversation: proto.String(message),
+	})
+	if err != nil {
+		return "", err
+	}
+	return resp.ID, nil
+}
+
+// SendReply sends a text message that quotes an earlier one. A quote needs
+// ExtendedTextMessage; Conversation carries no context info, so a reply cannot
+// reuse the plain send path above.
+func (w *WAClient) SendReply(
+	ctx context.Context,
+	recipient, message string,
+	quoted types.QuotedContext,
+) (string, error) {
+	if !w.client.IsConnected() {
+		return "", fmt.Errorf("not connected to WhatsApp")
+	}
+
+	recipientJID, err := parseJID(recipient)
+	if err != nil {
+		return "", fmt.Errorf("parsing recipient: %w", err)
+	}
+
+	participant, err := parseJID(quoted.Sender)
+	if err != nil {
+		return "", fmt.Errorf("parsing quoted sender: %w", err)
+	}
+
+	contextInfo := &waProto.ContextInfo{
+		StanzaID:    proto.String(quoted.ID),
+		Participant: proto.String(participant.String()),
+		QuotedMessage: &waProto.Message{
+			Conversation: proto.String(quoted.Text),
+		},
+	}
+
+	resp, err := w.client.SendMessage(ctx, recipientJID, &waProto.Message{
+		ExtendedTextMessage: &waProto.ExtendedTextMessage{
+			Text:        proto.String(message),
+			ContextInfo: contextInfo,
+		},
 	})
 	if err != nil {
 		return "", err
@@ -330,7 +381,6 @@ func parseJID(recipient string) (waTypes.JID, error) {
 		Server: "s.whatsapp.net",
 	}, nil
 }
-
 
 func (w *WAClient) DownloadMediaToFile(ctx context.Context, req types.MediaDownloadRequest, targetPath string) (int64, error) {
 	if w == nil || w.client == nil {

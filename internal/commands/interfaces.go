@@ -39,12 +39,14 @@ type MessageStore interface {
 // The concrete implementation is client.WAClient.
 type WAClient interface {
 	IsAuthenticated() bool
+	OwnJID() string
 	IsConnected() bool
 	IsLoggedIn() bool
 	Authenticate(ctx context.Context) error
 	Connect(ctx context.Context) error
 	Disconnect()
 	SendMessage(ctx context.Context, recipient, message string) (string, error)
+	SendReply(ctx context.Context, recipient, message string, quoted types.QuotedContext) (string, error)
 	SendImageMessage(ctx context.Context, recipient, imagePath, caption string) (string, error)
 	ResolveChatName(ctx context.Context, jid string, evt interface{}) string
 	DownloadMediaToFile(ctx context.Context, req types.MediaDownloadRequest, targetPath string) (int64, error)
