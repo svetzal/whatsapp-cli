@@ -180,6 +180,40 @@ func (a *App) SendMessage(ctx context.Context, recipient, message string) string
 	})
 }
 
+// quotedParticipant resolves the JID a quote must name as the author of the
+// message being quoted.
+//
+// The store records an outbound message's sender as "me", and an inbound one's
+// as a bare user part with no server. A bare part cannot be assumed to be a
+// phone JID: since the LID migration an inbound sender is often a LID user id,
+// and appending @s.whatsapp.net to one addresses a different account. In a
+// one-to-one chat the author is the chat itself, which sidesteps the guess. A
+// group has many authors, so there the stored sender is all we have.
+func (a *App) quotedParticipant(quoted store.MessageDownloadInfo, chatJID string) (string, error) {
+	if quoted.IsFromMe || quoted.Sender == "me" {
+		own := a.client.OwnJID()
+		if own == "" {
+			return "", errors.New("cannot quote our own message: this device is not paired")
+		}
+		return own, nil
+	}
+
+	if !strings.HasSuffix(chatJID, "@g.us") {
+		return chatJID, nil
+	}
+
+	if quoted.Sender == "" {
+		return "", fmt.Errorf("cannot quote message %s: no sender recorded", quoted.ID)
+	}
+	if !strings.Contains(quoted.Sender, "@") {
+		return "", fmt.Errorf(
+			"cannot quote message %s: sender %q has no server and may be a LID or a phone number",
+			quoted.ID, quoted.Sender,
+		)
+	}
+	return quoted.Sender, nil
+}
+
 // SendReply sends a text message quoting an earlier one. The quoted message is
 // read from the local store, so the id must belong to a message this store has
 // already synced.
@@ -190,15 +224,9 @@ func (a *App) SendReply(ctx context.Context, recipient, message, replyToID strin
 		return output.Error(fmt.Errorf("looking up message %s to reply to: %w", replyToID, err))
 	}
 
-	// An outbound message is stored with sender "me", which is not a JID the
-	// quote can address. Reply to our own message and WhatsApp needs our own
-	// account instead.
-	quotedSender := quotedMsg.Sender
-	if quotedMsg.IsFromMe || quotedSender == "me" {
-		quotedSender = a.client.OwnJID()
-		if quotedSender == "" {
-			return output.Error(fmt.Errorf("cannot quote our own message: own JID unavailable"))
-		}
+	quotedSender, err := a.quotedParticipant(quotedMsg, chatJID)
+	if err != nil {
+		return output.Error(err)
 	}
 
 	if err := a.client.Connect(ctx); err != nil {

@@ -46,6 +46,64 @@ func TestSendReply_QuotesTheStoredMessage(t *testing.T) {
 	require.Equal(t, "We got this new error when customer was making a payment", captured.Text)
 }
 
+// TestSendReply_OneToOneIgnoresBareStoredSender verifies a one-to-one quote
+// names the chat rather than the bare user part the store records. Since the
+// LID migration that part is often a LID id, and appending @s.whatsapp.net to
+// one addresses a different account entirely.
+func TestSendReply_OneToOneIgnoresBareStoredSender(t *testing.T) {
+	chatJID := "919916556163@s.whatsapp.net"
+
+	var captured types.QuotedContext
+	client := &MockWAClient{
+		SendReplyFunc: func(_ context.Context, _, _ string, quoted types.QuotedContext) (string, error) {
+			captured = quoted
+			return "sent-id", nil
+		},
+	}
+	st := &MockMessageStore{
+		GetMessageForDownloadFunc: func(id string, _ *string) (store.MessageDownloadInfo, error) {
+			return store.MessageDownloadInfo{
+				ID:      id,
+				ChatJID: chatJID,
+				Sender:  "68281557897304", // a LID user part, not a phone number
+				Content: "their message",
+			}, nil
+		},
+	}
+
+	app := NewAppWithDeps(client, st, t.TempDir(), "test")
+	result := app.SendReply(context.Background(), chatJID, "replying", "THEIRS-1")
+
+	require.True(t, parseResponse(t, result).Success, result)
+	require.Equal(t, chatJID, captured.Sender)
+}
+
+// TestSendReply_GroupWithBareSenderFails verifies a group quote refuses rather
+// than guessing a server for a bare sender, since a group has many authors and
+// the chat JID cannot stand in for one.
+func TestSendReply_GroupWithBareSenderFails(t *testing.T) {
+	groupJID := "120363421248048065@g.us"
+
+	sendCalled := false
+	client := &MockWAClient{
+		SendReplyFunc: func(_ context.Context, _, _ string, _ types.QuotedContext) (string, error) {
+			sendCalled = true
+			return "sent-id", nil
+		},
+	}
+	st := &MockMessageStore{
+		GetMessageForDownloadFunc: func(id string, _ *string) (store.MessageDownloadInfo, error) {
+			return store.MessageDownloadInfo{ID: id, ChatJID: groupJID, Sender: "68281557897304"}, nil
+		},
+	}
+
+	app := NewAppWithDeps(client, st, t.TempDir(), "test")
+	result := app.SendReply(context.Background(), groupJID, "replying", "THEIRS-1")
+
+	require.False(t, parseResponse(t, result).Success, "a bare group sender must not be guessed at")
+	require.False(t, sendCalled)
+}
+
 // TestSendReply_QuotingOurOwnMessageUsesOurJID verifies the "me" sender the
 // store records for outbound messages is replaced with an addressable JID.
 func TestSendReply_QuotingOurOwnMessageUsesOurJID(t *testing.T) {
