@@ -446,6 +446,69 @@ func mediaTypeFromString(mediaType string) (whatsmeow.MediaType, error) {
 	}
 }
 
+// unwrapMessage peels the container messages WhatsApp uses to carry a real
+// message inside another one.
+//
+// A disappearing-message chat wraps every message in EphemeralMessage, view-once
+// media in ViewOnceMessage, and anything sent from another of your own devices in
+// DeviceSentMessage. The payload only appears once those are peeled. Reading the
+// outer message directly yields a row with no content and no media type, which is
+// how 189 of 4,078 stored messages ended up blank, 89 of them in the busiest
+// client conversation.
+//
+// Bounded because these nest, and a malformed message must not spin here.
+func unwrapMessage(msg *waProto.Message) *waProto.Message {
+	for i := 0; msg != nil && i < 8; i++ {
+		switch {
+		case msg.GetEphemeralMessage().GetMessage() != nil:
+			msg = msg.GetEphemeralMessage().GetMessage()
+		case msg.GetViewOnceMessage().GetMessage() != nil:
+			msg = msg.GetViewOnceMessage().GetMessage()
+		case msg.GetViewOnceMessageV2().GetMessage() != nil:
+			msg = msg.GetViewOnceMessageV2().GetMessage()
+		case msg.GetViewOnceMessageV2Extension().GetMessage() != nil:
+			msg = msg.GetViewOnceMessageV2Extension().GetMessage()
+		case msg.GetDocumentWithCaptionMessage().GetMessage() != nil:
+			msg = msg.GetDocumentWithCaptionMessage().GetMessage()
+		case msg.GetDeviceSentMessage().GetMessage() != nil:
+			msg = msg.GetDeviceSentMessage().GetMessage()
+		case msg.GetEditedMessage().GetMessage() != nil:
+			msg = msg.GetEditedMessage().GetMessage()
+		default:
+			return msg
+		}
+	}
+	return msg
+}
+
+// describeUndecoded gives a message type we do not otherwise render a short
+// stand-in, so it shows up in the transcript rather than as a blank line.
+func describeUndecoded(msg *waProto.Message) string {
+	switch {
+	case msg.GetStickerMessage() != nil:
+		return "[sticker]"
+	case msg.GetContactMessage() != nil:
+		return "[contact: " + msg.GetContactMessage().GetDisplayName() + "]"
+	case msg.GetContactsArrayMessage() != nil:
+		return "[contacts]"
+	case msg.GetLocationMessage() != nil:
+		return "[location]"
+	case msg.GetLiveLocationMessage() != nil:
+		return "[live location]"
+	case msg.GetPollCreationMessage() != nil:
+		return "[poll: " + msg.GetPollCreationMessage().GetName() + "]"
+	case msg.GetPollUpdateMessage() != nil:
+		return "[poll vote]"
+	case msg.GetReactionMessage() != nil:
+		return "[reaction " + msg.GetReactionMessage().GetText() + "]"
+	case msg.GetProtocolMessage() != nil:
+		return "[message edited or deleted]"
+	case msg.GetTemplateMessage() != nil, msg.GetButtonsMessage() != nil, msg.GetListMessage() != nil:
+		return "[interactive message]"
+	}
+	return ""
+}
+
 // Helper to handle incoming messages
 func HandleMessage(msg *events.Message) MessageDetails {
 	sender := msg.Info.Sender.User
@@ -463,15 +526,15 @@ func HandleMessage(msg *events.Message) MessageDetails {
 		IsFromMe:  msg.Info.IsFromMe,
 	}
 
-	if msg.Message != nil {
+	if inner := unwrapMessage(msg.Message); inner != nil {
 		switch {
-		case msg.Message.GetConversation() != "":
-			details.Content = msg.Message.GetConversation()
-		case msg.Message.GetExtendedTextMessage() != nil:
-			details.Content = msg.Message.GetExtendedTextMessage().GetText()
+		case inner.GetConversation() != "":
+			details.Content = inner.GetConversation()
+		case inner.GetExtendedTextMessage() != nil:
+			details.Content = inner.GetExtendedTextMessage().GetText()
 		}
 
-		if img := msg.Message.GetImageMessage(); img != nil {
+		if img := inner.GetImageMessage(); img != nil {
 			if details.Content == "" {
 				details.Content = img.GetCaption()
 			}
@@ -487,7 +550,7 @@ func HandleMessage(msg *events.Message) MessageDetails {
 				FileEncSHA256: cloneBytes(img.GetFileEncSHA256()),
 				FileLength:    img.GetFileLength(),
 			}
-		} else if video := msg.Message.GetVideoMessage(); video != nil {
+		} else if video := inner.GetVideoMessage(); video != nil {
 			if details.Content == "" {
 				details.Content = video.GetCaption()
 			}
@@ -503,7 +566,7 @@ func HandleMessage(msg *events.Message) MessageDetails {
 				FileEncSHA256: cloneBytes(video.GetFileEncSHA256()),
 				FileLength:    video.GetFileLength(),
 			}
-		} else if audio := msg.Message.GetAudioMessage(); audio != nil {
+		} else if audio := inner.GetAudioMessage(); audio != nil {
 			if details.Content == "" {
 				details.Content = "[Audio]"
 			}
@@ -519,7 +582,7 @@ func HandleMessage(msg *events.Message) MessageDetails {
 				FileEncSHA256: cloneBytes(audio.GetFileEncSHA256()),
 				FileLength:    audio.GetFileLength(),
 			}
-		} else if doc := msg.Message.GetDocumentMessage(); doc != nil {
+		} else if doc := inner.GetDocumentMessage(); doc != nil {
 			if details.Content == "" {
 				details.Content = doc.GetCaption()
 			}
@@ -536,6 +599,10 @@ func HandleMessage(msg *events.Message) MessageDetails {
 				FileEncSHA256: cloneBytes(doc.GetFileEncSHA256()),
 				FileLength:    doc.GetFileLength(),
 			}
+		}
+
+		if details.Content == "" && details.Media == nil {
+			details.Content = describeUndecoded(inner)
 		}
 	}
 
